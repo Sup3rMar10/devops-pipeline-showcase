@@ -1,0 +1,114 @@
+name: Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: hello-pipeline:${{ github.sha }}
+
+jobs:
+  test:
+    name: 1. Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: pytest -q
+
+  build:
+    name: 2. Build once, scan the image and manifests
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image (the version is baked in as the git SHA)
+        run: docker build --build-arg APP_VERSION="${{ github.sha }}" -t "$IMAGE" app
+      - name: Scan the image for known vulnerabilities (fails on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Scan the Kubernetes manifests for misconfigurations
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: k8s
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+      - name: Save the image so the exact same bits are deployed and published
+        run: docker save "$IMAGE" -o image.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: image.tar
+          retention-days: 1
+
+  deploy:
+    name: 3. Deploy to a throwaway Kubernetes cluster, smoke test, rollback drill
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: demo
+      - name: Load the built image into the cluster
+        run: |
+          docker load -i image.tar
+          kind load docker-image "$IMAGE" --name demo
+      - name: Deploy
+        run: |
+          sed -i "s/newTag: .*/newTag: ${{ github.sha }}/" k8s/kustomization.yaml
+          kubectl apply -k k8s
+          kubectl rollout status deployment/hello --timeout=120s
+      - name: Smoke test (running version must be this commit)
+        run: scripts/smoke.sh "${{ github.sha }}"
+      - name: Rollback drill (bad release is blocked, service stays up, rollback works)
+        run: scripts/rollback_drill.sh "${{ github.sha }}"
+      - name: Show cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods -o wide
+          kubectl describe deployment hello
+          kubectl logs -l app=hello --tail=50 --all-containers=true || true
+
+  publish:
+    name: 4. Publish the verified image to GHCR (main only)
+    needs: deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+      - name: Push the same image that was deployed and tested
+        run: |
+          docker load -i image.tar
+          target="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "$IMAGE" "$target"
+          docker push "$target"
+          echo "Published \`$target\`" >> "$GITHUB_STEP_SUMMARY"

@@ -20,7 +20,7 @@ jobs:
     name: 1. Lint and unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -35,7 +35,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build the image (the version is baked in as the git SHA)
         run: docker build --build-arg APP_VERSION="${{ github.sha }}" -t "$IMAGE" app
       - name: Scan the image for known vulnerabilities (fails on fixable HIGH/CRITICAL)
@@ -65,7 +65,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           name: image

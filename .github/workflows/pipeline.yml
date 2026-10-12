@@ -54,7 +54,7 @@ jobs:
           exit-code: "1"
       - name: Save the image so the exact same bits are deployed and published
         run: docker save "$IMAGE" -o image.tar
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: image
           path: image.tar
